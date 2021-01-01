@@ -75,6 +75,11 @@ class BleakClientBlueZDBus(BaseBleakClient):
         s = re.search(b"(\\d+).(\\d+)", out.strip(b"'"))
         self._bluez_version = tuple(map(int, s.groups()))
 
+        # When a `start_notify()` is called before `connect()`, a "pending subscription"
+        # is stored in `self._subscriptions_pending`. These are turned to "full" ones
+        # once `connect()` is called.
+        self._subscriptions_pending = {}
+
     # Connectivity methods
 
     async def connect(self, **kwargs) -> bool:
@@ -168,6 +173,14 @@ class BleakClientBlueZDBus(BaseBleakClient):
         self._rules["PropChanged"] = await signals.listen_properties_changed(
             self._bus, self._properties_changed_callback
         )
+
+        # Now re-register all pending subscriptions. We need to iterate over a copy
+        # of keys since we're deleting the pending subscription as we go.
+        for char_specifier in list(self._subscriptions_pending.keys()):
+            callback, wrap = self._subscriptions_pending[char_specifier]
+            await self.start_notify(char_specifier, callback, notification_wrapper=wrap)
+            del self._subscriptions_pending[char_specifier]
+
         return True
 
     async def _cleanup_notifications(self) -> None:
@@ -697,6 +710,10 @@ class BleakClientBlueZDBus(BaseBleakClient):
                 notification to bytearray.
 
         """
+        if not await self.is_connected():
+            self._subscriptions_pending[str(char_specifier)] = (callback, kwargs.get("notification_wrapper", True))
+            return
+
         _wrap = kwargs.get("notification_wrapper", True)
         if not isinstance(char_specifier, BleakGATTCharacteristicBlueZDBus):
             characteristic = self.services.get_characteristic(char_specifier)
